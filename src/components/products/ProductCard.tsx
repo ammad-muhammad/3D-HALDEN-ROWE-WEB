@@ -37,6 +37,21 @@ export default function ProductCard({
     setSelectedColorId(cid);
   };
 
+  // Fallback: Ensure landing card suit is revealed if flight animation doesn't fire
+  React.useEffect(() => {
+    if (!landing) return;
+    const timer = setTimeout(() => {
+      const el = mediaRef.current?.querySelector<HTMLElement>('[data-landing-card-suit]');
+      if (el && el.style.opacity === '0') {
+        const layer = document.querySelector<HTMLElement>('[data-atelier-suit-layer]');
+        if (!layer || layer.style.visibility === 'hidden' || layer.style.opacity === '0') {
+          el.style.opacity = '1';
+        }
+      }
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [landing]);
+
   const pillText = mode === 'modal' ? 'Quick view' : 'View suit';
 
   return (

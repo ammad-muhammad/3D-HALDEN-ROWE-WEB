@@ -12,31 +12,14 @@ export function checkImageExists(src: string): Promise<boolean> {
     return Promise.resolve(imageCache.get(src)!);
   }
   return new Promise<boolean>((resolve) => {
-    let resolved = false;
     const img = new Image();
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        imageCache.set(src, false);
-        resolve(false);
-      }
-    }, 800);
-
     img.onload = () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        imageCache.set(src, true);
-        resolve(true);
-      }
+      imageCache.set(src, true);
+      resolve(true);
     };
     img.onerror = () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        imageCache.set(src, false);
-        resolve(false);
-      }
+      imageCache.set(src, false);
+      resolve(false);
     };
     img.src = src;
   });
@@ -88,33 +71,24 @@ export default function SuitView({
   const initialMeta = getColorMeta(colorId);
   const [slotA, setSlotA] = useState<LayerState>({
     ...initialMeta,
-    hasImage: false,
+    hasImage: true,
   });
   const [slotB, setSlotB] = useState<LayerState | null>(null);
 
-  // Check image on initial mount
+  // Animate on initial mount
   useEffect(() => {
-    let cancelled = false;
-    checkImageExists(initialMeta.src).then((exists) => {
-      if (!cancelled) {
-        setSlotA((prev) => ({ ...prev, hasImage: exists }));
-        if (layerARef.current && innerARef.current) {
-          if (instant) {
-            gsap.set(innerARef.current, { opacity: 1, scale: 1 });
-          } else {
-            gsap.fromTo(
-              innerARef.current,
-              { opacity: 0, scale: 0.96 },
-              { opacity: 1, scale: 1, duration: 0.45, ease: 'power2.out' }
-            );
-          }
-        }
+    if (layerARef.current && innerARef.current) {
+      if (instant) {
+        gsap.set(innerARef.current, { opacity: 1, scale: 1 });
+      } else {
+        gsap.fromTo(
+          innerARef.current,
+          { opacity: 0, scale: 0.96 },
+          { opacity: 1, scale: 1, duration: 0.45, ease: 'power2.out' }
+        );
       }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    }
+  }, [instant]);
 
   // Handle colorId change
   useEffect(() => {
@@ -273,7 +247,8 @@ export default function SuitView({
           {slotA.hasImage && (
             <img
               src={slotA.src}
-              alt=""
+              alt={slotA.name || product.name}
+              onError={() => setSlotA((prev) => ({ ...prev, hasImage: false }))}
               style={{
                 objectFit: 'contain',
                 width: '100%',
@@ -315,7 +290,8 @@ export default function SuitView({
             {slotB.hasImage && (
               <img
                 src={slotB.src}
-                alt=""
+                alt={slotB.name || product.name}
+                onError={() => setSlotB((prev) => prev ? ({ ...prev, hasImage: false }) : null)}
                 style={{
                   objectFit: 'contain',
                   width: '100%',

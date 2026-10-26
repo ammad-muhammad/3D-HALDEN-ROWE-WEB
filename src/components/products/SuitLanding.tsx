@@ -35,6 +35,7 @@ export default function SuitLanding() {
         retries++;
         if (retries >= MAX_RETRIES) {
           console.warn('[SuitLanding] giving up after', MAX_RETRIES, 'retries. missing:', missing.join(', '));
+          if (cardSuit) cardSuit.style.opacity = '1';
           return;
         }
         setTimeout(tryInit, 400);
