@@ -15,7 +15,7 @@ import {
   COVER_VH,
   type Beat,
 } from '@/lib/config';
-import { getNearestDecoded, getDecodedFrame, decodeAhead, frameCount } from '@/lib/frames';
+import { getNearestDecoded, getDecodedFrame, decodeAhead, frameCount, prioritizeClip } from '@/lib/frames';
 import { useLenis } from '@/lib/lenisContext';
 
 gsap.registerPlugin(ScrollTrigger);
@@ -114,6 +114,7 @@ export default function ScrollHero({ introReady }: ScrollHeroProps) {
     seamAlpha: -1,
     drawnImg: null,
   });
+  const lastAheadRef   = useRef({ clipId: '', idx: -1 });
   const ctxRef         = useRef<CanvasRenderingContext2D | null>(null);
   const canvasSizeRef  = useRef({ w: 0, h: 0 });
   const introPlayedRef = useRef(false);
@@ -236,8 +237,12 @@ export default function ScrollHero({ introReady }: ScrollHeroProps) {
       frameIdx = Math.round(localT * Math.max(0, frameCount(activeSegId) - 1));
     }
 
-    // Decode-ahead 40 frames in scroll direction, 10 in opposite across clip boundaries
-    decodeAhead(clipId, frameIdx, scrollDirectionRef.current);
+    // Decode-ahead prioritized frames when active clip or frame changes
+    if (lastAheadRef.current.clipId !== clipId || lastAheadRef.current.idx !== frameIdx) {
+      lastAheadRef.current = { clipId, idx: frameIdx };
+      decodeAhead(clipId, frameIdx, scrollDirectionRef.current);
+      prioritizeClip(clipId);
+    }
 
     const roundedSeamAlpha = seamAlpha >= 0 ? Math.round(seamAlpha * 100) / 100 : -1;
 

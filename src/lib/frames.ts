@@ -89,21 +89,30 @@ function initAllFrames(): void {
 initAllFrames();
 
 // ─── Decoded Set tracking ────────────────────────────────────────────────────
-// Only images that have resolved img.decode() are in decodedSet.
 const decodedSet = new Set<string>();
-const decodingSet = new Set<string>();
+const decodingMap = new Map<string, Promise<boolean>>();
+const failedCooldown = new Map<string, number>();
 
 export function isDecoded(clipId: string, index: number): boolean {
   return decodedSet.has(`${clipId}:${index}`);
 }
 
-/** Fire-and-forget decode for a specific frame */
-export function decodeFrame(clipId: string, index: number): void {
+/** Asynchronously decode a specific frame with deduping & cooldown */
+export function decodeFrame(clipId: string, index: number): Promise<boolean> {
   const key = `${clipId}:${index}`;
-  if (decodedSet.has(key) || decodingSet.has(key)) return;
+  if (decodedSet.has(key)) return Promise.resolve(true);
+
+  const existing = decodingMap.get(key);
+  if (existing) return existing;
+
+  const now = Date.now();
+  const failedAt = failedCooldown.get(key);
+  if (failedAt && now - failedAt < 2000) {
+    return Promise.resolve(false);
+  }
 
   const store = getStore(clipId);
-  if (index < 0 || index >= store.files.length) return;
+  if (index < 0 || index >= store.files.length) return Promise.resolve(false);
 
   let img = store.images[index];
   if (!img) {
@@ -113,23 +122,32 @@ export function decodeFrame(clipId: string, index: number): void {
     store.images[index] = img;
   }
 
-  decodingSet.add(key);
-  img.decode()
+  const promise = img.decode()
     .then(() => {
       decodedSet.add(key);
       store.loaded[index] = true;
+      decodingMap.delete(key);
+      failedCooldown.delete(key);
+      return true;
     })
     .catch(() => {
-      // Decode failed or aborted; ignore
-    })
-    .finally(() => {
-      decodingSet.delete(key);
+      decodingMap.delete(key);
+      failedCooldown.set(key, Date.now());
+      return false;
     });
+
+  decodingMap.set(key, promise);
+  return promise;
+}
+
+let activePriorityClip = 'clip1';
+export function prioritizeClip(clipId: string) {
+  activePriorityClip = clipId;
 }
 
 /**
- * Decode-ahead across clip boundaries:
- * Decodes 40 frames in scroll direction and 10 in opposite direction.
+ * Decode-ahead across clip boundaries prioritized by distance:
+ * Immediate closest frames load first!
  */
 export function decodeAhead(clipId: string, clipIndex: number, direction: number): void {
   initAllFrames();
@@ -137,30 +155,34 @@ export function decodeAhead(clipId: string, clipIndex: number, direction: number
   const currentGlobal = FRAME_KEY_TO_GLOBAL.get(key);
   if (currentGlobal === undefined) return;
 
-  // Ensure current frame is decoded or decoding
+  // Ensure current frame is decoded
   decodeFrame(clipId, clipIndex);
 
   const total = ALL_FRAMES.length;
   if (total === 0) return;
 
-  // Next 40 frames in scroll direction, 10 in opposite
-  const forwardCount  = direction >= 0 ? 40 : 10;
-  const backwardCount = direction >= 0 ? 10 : 40;
+  const forwardCount  = direction >= 0 ? 16 : 6;
+  const backwardCount = direction >= 0 ? 5 : 12;
 
-  // Ahead (higher global indices)
-  const forwardStart = currentGlobal + 1;
-  const forwardEnd   = Math.min(total - 1, currentGlobal + forwardCount);
-  for (let g = forwardStart; g <= forwardEnd; g++) {
-    const f = ALL_FRAMES[g];
-    decodeFrame(f.clipId, f.index);
-  }
-
-  // Behind (lower global indices)
-  const backwardStart = Math.max(0, currentGlobal - backwardCount);
-  const backwardEnd   = currentGlobal - 1;
-  for (let g = backwardEnd; g >= backwardStart; g--) {
-    const f = ALL_FRAMES[g];
-    decodeFrame(f.clipId, f.index);
+  // Interleave closest frames first (+1, +2, -1, +3, +4, -2, etc.)
+  const maxDelta = Math.max(forwardCount, backwardCount);
+  for (let d = 1; d <= maxDelta; d++) {
+    // Forward
+    if (d <= forwardCount) {
+      const g = currentGlobal + d;
+      if (g < total) {
+        const f = ALL_FRAMES[g];
+        decodeFrame(f.clipId, f.index);
+      }
+    }
+    // Backward
+    if (d <= backwardCount) {
+      const g = currentGlobal - d;
+      if (g >= 0) {
+        const f = ALL_FRAMES[g];
+        decodeFrame(f.clipId, f.index);
+      }
+    }
   }
 }
 
@@ -172,81 +194,91 @@ export function onClip1Progress(cb: (pct: number) => void) {
   clip1ProgressCallback = cb;
 }
 
-async function loadOne(store: FrameStore, index: number, clipId: string): Promise<void> {
-  const key = `${clipId}:${index}`;
-  if (decodedSet.has(key)) return;
-
-  const filename = store.files[index];
-  const src      = `${store.dir}/${filename}`;
-  let img        = store.images[index];
-  if (!img) {
-    img = new Image();
-    img.decoding = 'async';
-    img.src = src;
-    store.images[index] = img;
-  }
-
-  decodingSet.add(key);
-  try {
-    await img.decode();
-    decodedSet.add(key);
-    store.loaded[index] = true;
-  } catch {
-    // Image failed to decode
-    return;
-  } finally {
-    decodingSet.delete(key);
-  }
-}
-
-async function loadClipConcurrent(
+/**
+ * Concurrent loader with concurrency limit.
+ */
+async function loadIndicesConcurrent(
   clipId: string,
+  indices: number[],
   concurrency: number,
-  onProgress?: (done: number, total: number) => void,
+  onItemDone?: () => void,
 ): Promise<void> {
   const store = getStore(clipId);
-  if (store.files.length === 0) {
-    if (!store.warned) {
-      console.warn(`[frames] ${clipId} has no frames – canvas will show ink fill.`);
-      store.warned = true;
-    }
-    return;
-  }
+  if (store.files.length === 0 || indices.length === 0) return;
 
   let next = 0;
-  let done = 0;
-  const total = store.files.length;
-
   async function worker(): Promise<void> {
-    while (next < total) {
-      const idx = next++;
-      await loadOne(store, idx, clipId);
-      done++;
-      onProgress?.(done, total);
+    while (next < indices.length) {
+      const idx = indices[next++];
+      await decodeFrame(clipId, idx);
+      onItemDone?.();
     }
   }
 
   const workers: Promise<void>[] = [];
-  for (let w = 0; w < Math.min(concurrency, total); w++) {
+  const limit = Math.min(concurrency, indices.length);
+  for (let w = 0; w < limit; w++) {
     workers.push(worker());
   }
   await Promise.all(workers);
 }
 
-/** Preload clip1 first (loader waits for it), then clip2-4 in background. */
+/**
+ * Multi-tier intelligent preloader:
+ * Tier 1: Initial clip1 chunk for fast loader completion.
+ * Tier 2: Keyframe pass across ALL 4 clips (every 4th frame) so all sections have instant frames!
+ * Tier 3: Fill in remaining frames, prioritizing active clip.
+ */
 export function preloadAll(): void {
-  // Clip 1 – notify loader on each frame loaded
-  loadClipConcurrent('clip1', PRELOAD_CONCURRENCY, (done, total) => {
-    clip1ProgressCallback?.(done / total);
-  }).then(() => {
+  const clips = ['clip1', 'clip2', 'clip3', 'clip4'];
+
+  // Tier 1: First 25 frames of clip1 for the loader bar
+  const clip1Store = getStore('clip1');
+  const initialCount = Math.min(25, clip1Store.files.length);
+  const initialIndices = Array.from({ length: initialCount }, (_, i) => i);
+  let loadedInitial = 0;
+
+  loadIndicesConcurrent('clip1', initialIndices, PRELOAD_CONCURRENCY, () => {
+    loadedInitial++;
+    clip1ProgressCallback?.(loadedInitial / initialCount);
+  }).then(async () => {
     clip1ProgressCallback?.(1);
-    // Reset so next mount (hard refresh / Strict Mode) gets a clean registration
     clip1ProgressCallback = null;
-    // Continue with remaining clips sequentially
-    return loadClipConcurrent('clip2', PRELOAD_CONCURRENCY);
-  }).then(() => loadClipConcurrent('clip3', PRELOAD_CONCURRENCY))
-    .then(() => loadClipConcurrent('clip4', PRELOAD_CONCURRENCY))
-    .catch(() => { /* silent – individual failures already handled */ });
+
+    // Tier 2: Keyframe pass across all clips (step of 4)
+    // Ensures NO clip ever displays blank or old clip fallback!
+    for (const cId of clips) {
+      const store = getStore(cId);
+      const keyframeIndices: number[] = [];
+      for (let i = 0; i < store.files.length; i += 4) {
+        if (!decodedSet.has(`${cId}:${i}`)) {
+          keyframeIndices.push(i);
+        }
+      }
+      // Always include last frame of each clip
+      const last = store.files.length - 1;
+      if (last >= 0 && !keyframeIndices.includes(last)) {
+        keyframeIndices.push(last);
+      }
+
+      await loadIndicesConcurrent(cId, keyframeIndices, 6);
+    }
+
+    // Tier 3: Fill in remaining frames progressively
+    for (const cId of clips) {
+      const targetClip = activePriorityClip && activePriorityClip.startsWith('clip') ? activePriorityClip : cId;
+      const store = getStore(targetClip);
+      const remaining: number[] = [];
+      for (let i = 0; i < store.files.length; i++) {
+        if (!decodedSet.has(`${targetClip}:${i}`)) {
+          remaining.push(i);
+        }
+      }
+      await loadIndicesConcurrent(targetClip, remaining, 4);
+    }
+  }).catch(() => {
+    /* silent */
+  });
 }
 
 // ─── Public accessors ─────────────────────────────────────────────────────────
@@ -267,11 +299,6 @@ export function getFrame(clipId: string, i: number): HTMLImageElement | null {
 
 export const getDecodedFrame = getFrame;
 
-/**
- * Return the closest already-decoded frame at or before index i.
- * Searches across clip boundaries so it never blanks or blocks.
- * Never returns an image that has not finished decode.
- */
 export function getNearestLoaded(clipId: string, i: number): HTMLImageElement | null {
   return getNearestDecoded(clipId, i);
 }
