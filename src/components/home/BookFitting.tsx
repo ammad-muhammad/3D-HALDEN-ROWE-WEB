@@ -27,6 +27,7 @@ const F = {
 } as const;
 
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const phoneRe = /^\+?[\d\s\-]{7,15}$/;
 function getTodayStr() {
   return new Date().toISOString().slice(0, 10);
 }
